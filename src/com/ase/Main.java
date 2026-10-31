@@ -2,6 +2,8 @@ package com.ase;
 
 import java.math.BigDecimal;
 import java.nio.file.Path;
+import java.time.LocalDate;
+import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Scanner;
 
@@ -124,17 +126,36 @@ public class Main {
         if (studentId == null) {
             return;
         }
-        BigDecimal amount = readPositiveAmount(scanner, "Enter voucher amount: ");
-        if (amount == null) {
+        String semester = readRequiredInput(scanner, "Enter semester (for example, Fall 2026): ");
+        if (semester == null) {
+            return;
+        }
+        BigDecimal tuitionFee = readNonNegativeAmount(scanner, "Enter tuition fee: ");
+        if (tuitionFee == null) {
+            return;
+        }
+        BigDecimal labFee = readNonNegativeAmount(scanner, "Enter lab fee: ");
+        if (labFee == null) {
+            return;
+        }
+        BigDecimal otherCharges = readNonNegativeAmount(scanner, "Enter other charges: ");
+        if (otherCharges == null) {
+            return;
+        }
+        LocalDate dueDate = readDueDate(scanner);
+        if (dueDate == null) {
             return;
         }
 
         try {
-            FeeService.Voucher voucher = feeService.generateVoucher(studentId, amount);
+            FeeService.Voucher voucher = feeService.generateVoucher(studentId, semester,
+                    tuitionFee, labFee, otherCharges, dueDate);
             System.out.println("Voucher generated successfully.");
             printVoucher(voucher);
         } catch (IllegalArgumentException e) {
             System.out.println(e.getMessage());
+        } catch (IllegalStateException e) {
+            System.out.println("Unable to generate voucher: " + e.getMessage());
         }
     }
 
@@ -201,8 +222,14 @@ public class Main {
     private static void printVoucher(FeeService.Voucher voucher) {
         System.out.println("Voucher: " + voucher.getId()
                 + " | Student: " + voucher.getStudentId()
+                + " | Semester: " + voucher.getSemester()
+                + " | Tuition: " + voucher.getTuitionFee().toPlainString()
+                + " | Lab: " + voucher.getLabFee().toPlainString()
+                + " | Other charges: " + voucher.getOtherCharges().toPlainString()
+                + " | Merit discount: " + voucher.getDiscountAmount().toPlainString()
+                + " | Due date: " + voucher.getDueDate()
                 + " | Issued: " + voucher.getIssuedAt()
-                + " | Amount: " + voucher.getAmount().toPlainString()
+                + " | Net payable: " + voucher.getAmount().toPlainString()
                 + " | Paid: " + voucher.getPaidAmount().toPlainString()
                 + " | Balance: " + voucher.getBalance().toPlainString());
     }
@@ -240,6 +267,38 @@ public class Main {
                 }
             } catch (NumberFormatException e) {
                 System.out.println("Enter a valid amount, for example 125.50.");
+            }
+        }
+    }
+
+    private static BigDecimal readNonNegativeAmount(Scanner scanner, String prompt) {
+        while (true) {
+            String input = readRequiredInput(scanner, prompt);
+            if (input == null) {
+                return null;
+            }
+            if (!input.matches("(?:[0-9]+(?:\\.[0-9]{0,2})?|\\.[0-9]{1,2})")) {
+                System.out.println("Enter a valid amount, for example 125.50.");
+                continue;
+            }
+            try {
+                return new BigDecimal(input).setScale(2);
+            } catch (NumberFormatException e) {
+                System.out.println("Enter a valid amount, for example 125.50.");
+            }
+        }
+    }
+
+    private static LocalDate readDueDate(Scanner scanner) {
+        while (true) {
+            String input = readRequiredInput(scanner, "Enter due date (YYYY-MM-DD): ");
+            if (input == null) {
+                return null;
+            }
+            try {
+                return LocalDate.parse(input);
+            } catch (DateTimeParseException e) {
+                System.out.println("Enter a valid date in YYYY-MM-DD format.");
             }
         }
     }

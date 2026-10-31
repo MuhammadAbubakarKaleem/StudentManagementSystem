@@ -1,2 +1,2 @@
-voucher_id,student_id,amount,issued_at
-"FV-0001","S101","300.00","2026-10-31 21:16:09"
+voucher_id,student_id,semester,tuition_fee,lab_fee,other_charges,discount,amount,due_date,issued_at
+"V-0001","S101","Fall 2026","300.00","200.00","10.00","225.00","285.00","2026-09-12","2026-10-31 22:01:44"

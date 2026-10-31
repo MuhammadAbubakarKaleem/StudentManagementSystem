@@ -9,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -26,8 +27,16 @@ public class FeeService {
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final Path VOUCHER_FILE = Path.of("fee_vouchers.txt");
     private static final Path PAYMENT_FILE = Path.of("fee_payments.txt");
-    private static final String VOUCHER_HEADER = "voucher_id,student_id,amount,issued_at";
+    private static final String VOUCHER_HEADER =
+            "voucher_id,student_id,semester,tuition_fee,lab_fee,other_charges,discount,amount,due_date,issued_at";
+    private static final String LEGACY_VOUCHER_HEADER = "voucher_id,student_id,amount,issued_at";
     private static final String PAYMENT_HEADER = "receipt_id,voucher_id,amount,paid_at";
+    private static final BigDecimal GPA_TIER_ONE = new BigDecimal("3.7");
+    private static final BigDecimal GPA_TIER_TWO = new BigDecimal("3.5");
+    private static final BigDecimal GPA_TIER_THREE = new BigDecimal("3.3");
+    private static final BigDecimal DISCOUNT_TIER_ONE = new BigDecimal("0.75");
+    private static final BigDecimal DISCOUNT_TIER_TWO = new BigDecimal("0.50");
+    private static final BigDecimal DISCOUNT_TIER_THREE = new BigDecimal("0.25");
 
     private final List<Student> students;
     private final List<Voucher> vouchers = new ArrayList<>();
@@ -39,15 +48,48 @@ public class FeeService {
         loadSavedFees();
     }
 
-    public Voucher generateVoucher(String studentId, BigDecimal amount) {
+    public Voucher generateVoucher(String studentId, String semester, BigDecimal tuitionFee,
+            BigDecimal labFee, BigDecimal otherCharges, LocalDate dueDate) {
         Student student = findStudentById(studentId);
         if (student == null) {
             throw new IllegalArgumentException("Student not found.");
         }
 
-        BigDecimal validatedAmount = validateAmount(amount);
-        String voucherId = String.format("FV-%04d", nextVoucherNumber);
-        Voucher voucher = new Voucher(voucherId, student.id, validatedAmount, LocalDateTime.now());
+        String validatedSemester = validateSemester(semester);
+        for (Voucher existingVoucher : vouchers) {
+            if (existingVoucher.getStudentId().equalsIgnoreCase(student.id)
+                    && existingVoucher.getSemester().equalsIgnoreCase(validatedSemester)) {
+                throw new IllegalArgumentException(
+                        "A voucher already exists for this student and semester.");
+            }
+        }
+
+        BigDecimal validatedTuition = validateFeeAmount(tuitionFee, "Tuition fee");
+        BigDecimal validatedLab = validateFeeAmount(labFee, "Lab fee");
+        BigDecimal validatedOther = validateFeeAmount(otherCharges, "Other charges");
+        if (validatedTuition.add(validatedLab).add(validatedOther).signum() <= 0) {
+            throw new IllegalArgumentException("The total fees must be greater than zero.");
+        }
+        if (dueDate == null) {
+            throw new IllegalArgumentException("Due date is required.");
+        }
+
+        if (!Double.isFinite(student.gpa)) {
+            throw new IllegalArgumentException("Student GPA must be between 0.0 and 4.0.");
+        }
+        BigDecimal gpa = BigDecimal.valueOf(student.gpa);
+        if (gpa.signum() < 0 || gpa.compareTo(BigDecimal.valueOf(4)) > 0) {
+            throw new IllegalArgumentException("Student GPA must be between 0.0 and 4.0.");
+        }
+        BigDecimal discountRate = discountRateFor(gpa);
+        BigDecimal discountAmount = validatedTuition.multiply(discountRate)
+                .setScale(2, RoundingMode.HALF_UP);
+        BigDecimal amount = validatedTuition.subtract(discountAmount)
+                .add(validatedLab).add(validatedOther);
+
+        String voucherId = String.format(Locale.ROOT, "V-%04d", nextVoucherNumber);
+        Voucher voucher = new Voucher(voucherId, student.id, validatedSemester, validatedTuition,
+                validatedLab, validatedOther, discountAmount, amount, dueDate, LocalDateTime.now());
         vouchers.add(voucher);
         try {
             saveVouchers();
@@ -57,6 +99,30 @@ public class FeeService {
         }
         nextVoucherNumber++;
         return voucher;
+    }
+
+    private static BigDecimal discountRateFor(BigDecimal gpa) {
+        if (gpa.compareTo(GPA_TIER_ONE) >= 0) {
+            return DISCOUNT_TIER_ONE;
+        }
+        if (gpa.compareTo(GPA_TIER_TWO) >= 0) {
+            return DISCOUNT_TIER_TWO;
+        }
+        if (gpa.compareTo(GPA_TIER_THREE) >= 0) {
+            return DISCOUNT_TIER_THREE;
+        }
+        return BigDecimal.ZERO;
+    }
+
+    private static String validateSemester(String semester) {
+        if (semester == null || semester.trim().isEmpty()) {
+            throw new IllegalArgumentException("Semester label cannot be empty.");
+        }
+        String validatedSemester = semester.trim();
+        if (validatedSemester.length() > 50) {
+            throw new IllegalArgumentException("Semester label cannot exceed 50 characters.");
+        }
+        return validatedSemester;
     }
 
     public Payment recordPayment(String voucherId, BigDecimal amount) {
@@ -160,6 +226,17 @@ public class FeeService {
         }
     }
 
+    private static BigDecimal validateFeeAmount(BigDecimal amount, String fieldName) {
+        if (amount == null || amount.signum() < 0) {
+            throw new IllegalArgumentException(fieldName + " cannot be negative.");
+        }
+        if (amount.stripTrailingZeros().scale() > 2) {
+            throw new IllegalArgumentException(
+                    fieldName + " can have no more than two decimal places.");
+        }
+        return amount.setScale(2, RoundingMode.UNNECESSARY);
+    }
+
     private void loadSavedFees() {
         loadVouchers();
         loadPayments();
@@ -174,24 +251,57 @@ public class FeeService {
         try {
             for (String line : Files.readAllLines(VOUCHER_FILE, StandardCharsets.UTF_8)) {
                 lineNumber++;
-                if (lineNumber == 1 && line.equals(VOUCHER_HEADER)) {
+                if (lineNumber == 1 && (line.equals(VOUCHER_HEADER)
+                        || line.equals(LEGACY_VOUCHER_HEADER))) {
                     continue;
                 }
                 List<String> fields = parseCsvLine(line);
-                if (fields.size() != 4) {
-                    throw new IllegalArgumentException("Expected 4 CSV fields.");
-                }
-
                 String voucherId = requireText(fields.get(0), "voucher ID");
                 String studentId = requireText(fields.get(1), "student ID");
-                int voucherNumber = parseIdentifierNumber(voucherId, "FV-");
+                int voucherNumber = parseVoucherNumber(voucherId);
                 if (findVoucherById(voucherId) != null) {
                     throw new IllegalArgumentException("Duplicate voucher ID: " + voucherId);
                 }
 
-                BigDecimal amount = parseStoredAmount(fields.get(2));
-                LocalDateTime issuedAt = LocalDateTime.parse(fields.get(3), DATE_FORMAT);
-                vouchers.add(new Voucher(voucherId, studentId, amount, issuedAt));
+                Voucher voucher;
+                if (fields.size() == 4) {
+                    BigDecimal amount = parseStoredAmount(fields.get(2));
+                    LocalDateTime issuedAt = LocalDateTime.parse(fields.get(3), DATE_FORMAT);
+                    voucher = new Voucher(voucherId, studentId, "Legacy", amount,
+                            BigDecimal.ZERO.setScale(2), BigDecimal.ZERO.setScale(2),
+                            BigDecimal.ZERO.setScale(2), amount, issuedAt.toLocalDate(), issuedAt);
+                } else if (fields.size() == 10) {
+                    String semester = validateSemester(fields.get(2));
+                    BigDecimal tuitionFee = validateFeeAmount(
+                            new BigDecimal(fields.get(3)), "Tuition fee");
+                    BigDecimal labFee = validateFeeAmount(new BigDecimal(fields.get(4)), "Lab fee");
+                    BigDecimal otherCharges = validateFeeAmount(
+                            new BigDecimal(fields.get(5)), "Other charges");
+                    BigDecimal discount = validateFeeAmount(
+                            new BigDecimal(fields.get(6)), "Discount");
+                    BigDecimal amount = parseStoredAmount(fields.get(7));
+                    LocalDate dueDate = LocalDate.parse(fields.get(8));
+                    LocalDateTime issuedAt = LocalDateTime.parse(fields.get(9), DATE_FORMAT);
+                    if (discount.compareTo(tuitionFee) > 0) {
+                        throw new IllegalArgumentException("Discount cannot exceed tuition fee.");
+                    }
+                    if (tuitionFee.subtract(discount).add(labFee).add(otherCharges)
+                            .compareTo(amount) != 0) {
+                        throw new IllegalArgumentException("Voucher total does not match its fees.");
+                    }
+                    for (Voucher existingVoucher : vouchers) {
+                        if (existingVoucher.getStudentId().equalsIgnoreCase(studentId)
+                                && existingVoucher.getSemester().equalsIgnoreCase(semester)) {
+                            throw new IllegalArgumentException(
+                                    "Duplicate voucher for student and semester.");
+                        }
+                    }
+                    voucher = new Voucher(voucherId, studentId, semester, tuitionFee, labFee,
+                            otherCharges, discount, amount, dueDate, issuedAt);
+                } else {
+                    throw new IllegalArgumentException("Expected 4 or 10 CSV fields.");
+                }
+                vouchers.add(voucher);
                 nextVoucherNumber = Math.max(nextVoucherNumber, voucherNumber + 1);
             }
         } catch (IOException | RuntimeException e) {
@@ -257,8 +367,10 @@ public class FeeService {
         List<String> lines = new ArrayList<>();
         lines.add(VOUCHER_HEADER);
         for (Voucher voucher : vouchers) {
-            lines.add(csvRow(voucher.id, voucher.studentId, voucher.amount.toPlainString(),
-                    voucher.getIssuedAt()));
+            lines.add(csvRow(voucher.id, voucher.studentId, voucher.semester,
+                    voucher.tuitionFee.toPlainString(), voucher.labFee.toPlainString(),
+                    voucher.otherCharges.toPlainString(), voucher.discountAmount.toPlainString(),
+                    voucher.amount.toPlainString(), voucher.getDueDate(), voucher.getIssuedAt()));
         }
         return lines;
     }
@@ -389,6 +501,13 @@ public class FeeService {
         }
     }
 
+    private static int parseVoucherNumber(String identifier) {
+        if (identifier.startsWith("V-")) {
+            return parseIdentifierNumber(identifier, "V-");
+        }
+        return parseIdentifierNumber(identifier, "FV-");
+    }
+
     private static IllegalStateException persistenceLoadError(Path file, int lineNumber,
             Exception cause) {
         return new IllegalStateException("Unable to load fee data from " + file
@@ -398,14 +517,28 @@ public class FeeService {
     public static final class Voucher {
         private final String id;
         private final String studentId;
+        private final String semester;
+        private final BigDecimal tuitionFee;
+        private final BigDecimal labFee;
+        private final BigDecimal otherCharges;
+        private final BigDecimal discountAmount;
         private final BigDecimal amount;
+        private final LocalDate dueDate;
         private final LocalDateTime issuedAt;
         private final List<Payment> payments = new ArrayList<>();
 
-        private Voucher(String id, String studentId, BigDecimal amount, LocalDateTime issuedAt) {
+        private Voucher(String id, String studentId, String semester, BigDecimal tuitionFee,
+                BigDecimal labFee, BigDecimal otherCharges, BigDecimal discountAmount,
+                BigDecimal amount, LocalDate dueDate, LocalDateTime issuedAt) {
             this.id = id;
             this.studentId = studentId;
+            this.semester = semester;
+            this.tuitionFee = tuitionFee;
+            this.labFee = labFee;
+            this.otherCharges = otherCharges;
+            this.discountAmount = discountAmount;
             this.amount = amount;
+            this.dueDate = dueDate;
             this.issuedAt = issuedAt;
         }
 
@@ -417,8 +550,32 @@ public class FeeService {
             return studentId;
         }
 
+        public String getSemester() {
+            return semester;
+        }
+
+        public BigDecimal getTuitionFee() {
+            return tuitionFee;
+        }
+
+        public BigDecimal getLabFee() {
+            return labFee;
+        }
+
+        public BigDecimal getOtherCharges() {
+            return otherCharges;
+        }
+
+        public BigDecimal getDiscountAmount() {
+            return discountAmount;
+        }
+
         public BigDecimal getAmount() {
             return amount;
+        }
+
+        public String getDueDate() {
+            return dueDate.toString();
         }
 
         public String getIssuedAt() {
