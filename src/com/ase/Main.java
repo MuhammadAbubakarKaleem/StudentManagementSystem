@@ -1,13 +1,16 @@
 package com.ase;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Scanner;
 
 import com.ase.model.Student;
+import com.ase.service.FeeService;
 import com.ase.service.StudentService;
 
 public class Main {
-    private static StudentService service = new StudentService();
+    private static final StudentService service = new StudentService();
+    private static final FeeService feeService = new FeeService(service.getAllStudents());
 
     public static void main(String[] args) {
         Scanner scanner = new Scanner(System.in);
@@ -20,14 +23,16 @@ public class Main {
         while (running) {
             printMenu();
             System.out.print("Select an option: ");
-            
-            int choice = -1;
+
+            if (!scanner.hasNextLine()) {
+                break;
+            }
+            String input = scanner.nextLine().trim();
+            int choice;
             try {
-                choice = scanner.nextInt();
-                scanner.nextLine();
-            } catch (Exception e) {
-                System.out.println("Invalid input type!");
-                scanner.nextLine();
+                choice = Integer.parseInt(input);
+            } catch (NumberFormatException e) {
+                System.out.println("Invalid input type. Enter a menu number.");
                 continue;
             }
 
@@ -45,7 +50,7 @@ public class Main {
                     System.out.println("Average GPA: " + service.calculateAverageGpa());
                     break;
                 case 9:
-                    runCustomTeamModule(scanner);
+                    runFeeModule(scanner);
                     break;
                 case 0:
                     running = false;
@@ -64,13 +69,178 @@ public class Main {
         System.out.println("2. Add New Student");
         System.out.println("3. Find Student by ID (Buggy)");
         System.out.println("4. Display Class GPA Average (Buggy)");
-        System.out.println("9. Custom Team Module ");
+        System.out.println("9. Fee Management");
         System.out.println("0. Exit");
     }
 
-    private static void runCustomTeamModule(Scanner scanner) {
-        System.out.println("\n[Feature Module Placeholder]");
-        System.out.println("Use AI to implement your assigned domain module (e.g., Attendance, Fees, Teacher Management).");
+    private static void runFeeModule(Scanner scanner) {
+        boolean inFeeModule = true;
+        while (inFeeModule) {
+            System.out.println("\n--- FEE MANAGEMENT ---");
+            System.out.println("1. Generate Voucher");
+            System.out.println("2. Record Payment");
+            System.out.println("3. Fee Statement");
+            System.out.println("4. Defaulters List (outstanding balances)");
+            System.out.println("0. Back to Main Menu");
+            System.out.print("Select an option: ");
+
+            if (!scanner.hasNextLine()) {
+                return;
+            }
+            String input = scanner.nextLine().trim();
+            int choice;
+            try {
+                choice = Integer.parseInt(input);
+            } catch (NumberFormatException e) {
+                System.out.println("Invalid input. Enter a menu number.");
+                continue;
+            }
+
+            switch (choice) {
+                case 1:
+                    generateFeeVoucher(scanner);
+                    break;
+                case 2:
+                    recordFeePayment(scanner);
+                    break;
+                case 3:
+                    displayFeeStatement(scanner);
+                    break;
+                case 4:
+                    displayDefaulters();
+                    break;
+                case 0:
+                    inFeeModule = false;
+                    break;
+                default:
+                    System.out.println("Invalid option. Try again.");
+            }
+        }
+    }
+
+    private static void generateFeeVoucher(Scanner scanner) {
+        String studentId = readRequiredInput(scanner, "Enter Student ID: ");
+        if (studentId == null) {
+            return;
+        }
+        BigDecimal amount = readPositiveAmount(scanner, "Enter voucher amount: ");
+        if (amount == null) {
+            return;
+        }
+
+        try {
+            FeeService.Voucher voucher = feeService.generateVoucher(studentId, amount);
+            System.out.println("Voucher generated successfully.");
+            printVoucher(voucher);
+        } catch (IllegalArgumentException e) {
+            System.out.println(e.getMessage());
+        }
+    }
+
+    private static void recordFeePayment(Scanner scanner) {
+        String voucherId = readRequiredInput(scanner, "Enter Voucher ID: ");
+        if (voucherId == null) {
+            return;
+        }
+        BigDecimal amount = readPositiveAmount(scanner, "Enter payment amount: ");
+        if (amount == null) {
+            return;
+        }
+
+        try {
+            FeeService.Payment payment = feeService.recordPayment(voucherId, amount);
+            System.out.println("Payment recorded: " + payment.getAmount().toPlainString()
+                    + " on " + payment.getPaidAt());
+        } catch (IllegalArgumentException e) {
+            System.out.println(e.getMessage());
+        }
+    }
+
+    private static void displayFeeStatement(Scanner scanner) {
+        String studentId = readRequiredInput(scanner, "Enter Student ID: ");
+        if (studentId == null) {
+            return;
+        }
+        Student student = feeService.findStudentById(studentId);
+        if (student == null) {
+            System.out.println("Student not found.");
+            return;
+        }
+
+        List<FeeService.Voucher> vouchers = feeService.getFeeStatement(studentId);
+        System.out.println("\nFee statement for " + student.n + " (" + student.id + ")");
+        if (vouchers.isEmpty()) {
+            System.out.println("No fee vouchers found.");
+            return;
+        }
+        for (FeeService.Voucher voucher : vouchers) {
+            printVoucher(voucher);
+            for (FeeService.Payment payment : voucher.getPayments()) {
+                System.out.println("  Payment: " + payment.getAmount().toPlainString()
+                        + " on " + payment.getPaidAt());
+            }
+        }
+    }
+
+    private static void displayDefaulters() {
+        List<FeeService.Defaulter> defaulters = feeService.getDefaulters();
+        if (defaulters.isEmpty()) {
+            System.out.println("No outstanding fee balances.");
+            return;
+        }
+        System.out.println("\n--- STUDENTS WITH OUTSTANDING FEES ---");
+        for (FeeService.Defaulter defaulter : defaulters) {
+            System.out.println("ID: " + defaulter.getStudentId()
+                    + " | Name: " + defaulter.getStudentName()
+                    + " | Outstanding: " + defaulter.getOutstandingAmount().toPlainString()
+                    + " | Unpaid vouchers: " + defaulter.getOutstandingVoucherCount());
+        }
+    }
+
+    private static void printVoucher(FeeService.Voucher voucher) {
+        System.out.println("Voucher: " + voucher.getId()
+                + " | Student: " + voucher.getStudentId()
+                + " | Issued: " + voucher.getIssuedAt()
+                + " | Amount: " + voucher.getAmount().toPlainString()
+                + " | Paid: " + voucher.getPaidAmount().toPlainString()
+                + " | Balance: " + voucher.getBalance().toPlainString());
+    }
+
+    private static String readRequiredInput(Scanner scanner, String prompt) {
+        while (true) {
+            System.out.print(prompt);
+            if (!scanner.hasNextLine()) {
+                return null;
+            }
+            String input = scanner.nextLine().trim();
+            if (!input.isEmpty()) {
+                return input;
+            }
+            System.out.println("Input cannot be empty.");
+        }
+    }
+
+    private static BigDecimal readPositiveAmount(Scanner scanner, String prompt) {
+        while (true) {
+            String input = readRequiredInput(scanner, prompt);
+            if (input == null) {
+                return null;
+            }
+            if (!input.matches("(?:[0-9]+(?:\\.[0-9]{0,2})?|\\.[0-9]{1,2})")) {
+                System.out.println("Enter a valid amount, for example 125.50.");
+                continue;
+            }
+            try {
+                BigDecimal amount = new BigDecimal(input);
+                if (amount.signum() <= 0) {
+                    System.out.println("Amount must be greater than zero.");
+                } else {
+                    return amount.setScale(2);
+                }
+            } catch (NumberFormatException e) {
+                System.out.println("Enter a valid amount, for example 125.50.");
+            }
+        }
     }
 
     private static void listAllStudents() {
