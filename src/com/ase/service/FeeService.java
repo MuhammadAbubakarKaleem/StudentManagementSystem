@@ -12,6 +12,7 @@ import java.nio.file.StandardOpenOption;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -30,7 +31,10 @@ public class FeeService {
     private static final String VOUCHER_HEADER =
             "voucher_id,student_id,semester,tuition_fee,lab_fee,other_charges,discount,amount,due_date,issued_at";
     private static final String LEGACY_VOUCHER_HEADER = "voucher_id,student_id,amount,issued_at";
-    private static final String PAYMENT_HEADER = "receipt_id,voucher_id,amount,paid_at";
+    private static final String PAYMENT_HEADER = "receipt_id,voucher_id,amount,method,paid_at";
+    private static final String LEGACY_PAYMENT_HEADER = "receipt_id,voucher_id,amount,paid_at";
+    private static final BigDecimal DAILY_LATE_FEE = new BigDecimal("100.00");
+    private static final BigDecimal LATE_FEE_CAP_RATE = new BigDecimal("0.10");
     private static final BigDecimal GPA_TIER_ONE = new BigDecimal("3.7");
     private static final BigDecimal GPA_TIER_TWO = new BigDecimal("3.5");
     private static final BigDecimal GPA_TIER_THREE = new BigDecimal("3.3");
@@ -126,6 +130,11 @@ public class FeeService {
     }
 
     public Payment recordPayment(String voucherId, BigDecimal amount) {
+        return recordPayment(voucherId, amount, PaymentMethod.CASH, LocalDate.now());
+    }
+
+    public Payment recordPayment(String voucherId, BigDecimal amount, PaymentMethod method,
+            LocalDate paymentDate) {
         Voucher voucher = findVoucherById(voucherId);
         if (voucher == null) {
             throw new IllegalArgumentException("Voucher not found.");
@@ -136,9 +145,15 @@ public class FeeService {
             throw new IllegalArgumentException("Payment cannot exceed the voucher balance of "
                     + voucher.getBalance().toPlainString() + ".");
         }
+        if (method == null || method == PaymentMethod.UNSPECIFIED) {
+            throw new IllegalArgumentException("Select Cash, Bank or Online as the payment method.");
+        }
+        if (paymentDate == null) {
+            throw new IllegalArgumentException("Payment date is required.");
+        }
 
-        Payment payment = new Payment(String.format("FR-%04d", nextReceiptNumber),
-                validatedAmount, LocalDateTime.now());
+        Payment payment = new Payment(String.format(Locale.ROOT, "R-%04d", nextReceiptNumber),
+                validatedAmount, method, paymentDate.atStartOfDay());
         voucher.addPayment(payment);
         try {
             savePayments();
@@ -319,17 +334,18 @@ public class FeeService {
         try {
             for (String line : Files.readAllLines(PAYMENT_FILE, StandardCharsets.UTF_8)) {
                 lineNumber++;
-                if (lineNumber == 1 && line.equals(PAYMENT_HEADER)) {
+                if (lineNumber == 1 && (line.equals(PAYMENT_HEADER)
+                        || line.equals(LEGACY_PAYMENT_HEADER))) {
                     continue;
                 }
                 List<String> fields = parseCsvLine(line);
-                if (fields.size() != 4) {
-                    throw new IllegalArgumentException("Expected 4 CSV fields.");
+                if (fields.size() != 4 && fields.size() != 5) {
+                    throw new IllegalArgumentException("Expected 4 or 5 CSV fields.");
                 }
 
                 String receiptId = requireText(fields.get(0), "receipt ID");
                 String voucherId = requireText(fields.get(1), "voucher ID");
-                int receiptNumber = parseIdentifierNumber(receiptId, "FR-");
+                int receiptNumber = parseReceiptNumber(receiptId);
                 if (!receiptIds.add(receiptId.toUpperCase(Locale.ROOT))) {
                     throw new IllegalArgumentException("Duplicate receipt ID: " + receiptId);
                 }
@@ -340,12 +356,16 @@ public class FeeService {
                             "Payment refers to unknown voucher ID: " + voucherId);
                 }
                 BigDecimal amount = parseStoredAmount(fields.get(2));
+                PaymentMethod method = fields.size() == 5
+                        ? PaymentMethod.fromStoredValue(fields.get(3))
+                        : PaymentMethod.UNSPECIFIED;
                 if (amount.compareTo(voucher.getBalance()) > 0) {
                     throw new IllegalArgumentException(
                             "Payments exceed the balance for voucher ID: " + voucherId);
                 }
-                LocalDateTime paidAt = LocalDateTime.parse(fields.get(3), DATE_FORMAT);
-                voucher.addPayment(new Payment(receiptId, amount, paidAt));
+                String paidAtValue = fields.get(fields.size() - 1);
+                LocalDateTime paidAt = parsePaymentDate(paidAtValue);
+                voucher.addPayment(new Payment(receiptId, amount, method, paidAt));
                 nextReceiptNumber = Math.max(nextReceiptNumber, receiptNumber + 1);
             }
         } catch (IOException | RuntimeException e) {
@@ -381,10 +401,18 @@ public class FeeService {
         for (Voucher voucher : vouchers) {
             for (Payment payment : voucher.payments) {
                 lines.add(csvRow(payment.receiptId, voucher.id, payment.amount.toPlainString(),
-                        payment.getPaidAt()));
+                        payment.method.getDisplayName(), payment.getPaidAt()));
             }
         }
         return lines;
+    }
+
+    private static LocalDateTime parsePaymentDate(String value) {
+        try {
+            return LocalDate.parse(value).atStartOfDay();
+        } catch (java.time.format.DateTimeParseException e) {
+            return LocalDateTime.parse(value, DATE_FORMAT);
+        }
     }
 
     private static void createCsvIfMissing(Path file, List<String> lines) {
@@ -501,6 +529,13 @@ public class FeeService {
         }
     }
 
+    private static int parseReceiptNumber(String receiptId) {
+        if (receiptId.startsWith("R-")) {
+            return parseIdentifierNumber(receiptId, "R-");
+        }
+        return parseIdentifierNumber(receiptId, "FR-");
+    }
+
     private static int parseVoucherNumber(String identifier) {
         if (identifier.startsWith("V-")) {
             return parseIdentifierNumber(identifier, "V-");
@@ -594,6 +629,21 @@ public class FeeService {
             return amount.subtract(getPaidAmount());
         }
 
+        public BigDecimal getLateFee(LocalDate asOfDate) {
+            if (asOfDate == null) {
+                throw new IllegalArgumentException("As-of date is required.");
+            }
+            if (getBalance().signum() <= 0 || !asOfDate.isAfter(dueDate)) {
+                return BigDecimal.ZERO.setScale(2);
+            }
+
+            long overdueDays = ChronoUnit.DAYS.between(dueDate, asOfDate);
+            BigDecimal calculatedFee = DAILY_LATE_FEE.multiply(BigDecimal.valueOf(overdueDays));
+            BigDecimal feeCap = amount.multiply(LATE_FEE_CAP_RATE)
+                    .setScale(2, RoundingMode.HALF_UP);
+            return calculatedFee.min(feeCap);
+        }
+
         public List<Payment> getPayments() {
             return Collections.unmodifiableList(payments);
         }
@@ -610,11 +660,14 @@ public class FeeService {
     public static final class Payment {
         private final String receiptId;
         private final BigDecimal amount;
+        private final PaymentMethod method;
         private final LocalDateTime paidAt;
 
-        private Payment(String receiptId, BigDecimal amount, LocalDateTime paidAt) {
+        private Payment(String receiptId, BigDecimal amount, PaymentMethod method,
+                LocalDateTime paidAt) {
             this.receiptId = receiptId;
             this.amount = amount;
+            this.method = method;
             this.paidAt = paidAt;
         }
 
@@ -626,8 +679,50 @@ public class FeeService {
             return amount;
         }
 
+        public PaymentMethod getMethod() {
+            return method;
+        }
+
         public String getPaidAt() {
             return paidAt.format(DATE_FORMAT);
+        }
+    }
+
+    public enum PaymentMethod {
+        CASH("Cash"),
+        BANK("Bank"),
+        ONLINE("Online"),
+        UNSPECIFIED("Unspecified");
+
+        private final String displayName;
+
+        PaymentMethod(String displayName) {
+            this.displayName = displayName;
+        }
+
+        public String getDisplayName() {
+            return displayName;
+        }
+
+        public static PaymentMethod fromInput(String input) {
+            if (input != null) {
+                for (PaymentMethod method : values()) {
+                    if (method != UNSPECIFIED
+                            && method.displayName.equalsIgnoreCase(input.trim())) {
+                        return method;
+                    }
+                }
+            }
+            throw new IllegalArgumentException("Enter Cash, Bank or Online.");
+        }
+
+        private static PaymentMethod fromStoredValue(String value) {
+            for (PaymentMethod method : values()) {
+                if (method.displayName.equalsIgnoreCase(value)) {
+                    return method;
+                }
+            }
+            throw new IllegalArgumentException("Invalid stored payment method: " + value);
         }
     }
 

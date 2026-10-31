@@ -168,13 +168,26 @@ public class Main {
         if (amount == null) {
             return;
         }
+        FeeService.PaymentMethod method = readPaymentMethod(scanner);
+        if (method == null) {
+            return;
+        }
+        LocalDate paymentDate = readDate(scanner, "Enter payment date (YYYY-MM-DD): ");
+        if (paymentDate == null) {
+            return;
+        }
 
         try {
-            FeeService.Payment payment = feeService.recordPayment(voucherId, amount);
-            System.out.println("Payment recorded: " + payment.getAmount().toPlainString()
-                    + " on " + payment.getPaidAt());
+            FeeService.Payment payment = feeService.recordPayment(voucherId, amount, method,
+                    paymentDate);
+            System.out.println("Payment recorded. Receipt: " + payment.getReceiptId()
+                    + " | Amount: " + payment.getAmount().toPlainString()
+                    + " | Method: " + payment.getMethod().getDisplayName()
+                    + " | Date: " + paymentDate);
         } catch (IllegalArgumentException e) {
             System.out.println(e.getMessage());
+        } catch (IllegalStateException e) {
+            System.out.println("Unable to record payment: " + e.getMessage());
         }
     }
 
@@ -195,11 +208,20 @@ public class Main {
             System.out.println("No fee vouchers found.");
             return;
         }
+        LocalDate asOfDate = readDate(scanner, "Calculate late fees as of (YYYY-MM-DD): ");
+        if (asOfDate == null) {
+            return;
+        }
         for (FeeService.Voucher voucher : vouchers) {
             printVoucher(voucher);
+            BigDecimal lateFee = voucher.getLateFee(asOfDate);
+            System.out.println("  Late fee as of " + asOfDate + ": PKR "
+                    + lateFee.toPlainString() + " | Total due: PKR "
+                    + voucher.getBalance().add(lateFee).toPlainString());
             for (FeeService.Payment payment : voucher.getPayments()) {
-                System.out.println("  Payment: " + payment.getAmount().toPlainString()
-                        + " on " + payment.getPaidAt());
+                System.out.println("  Payment: " + payment.getReceiptId() + " | "
+                        + payment.getAmount().toPlainString() + " | "
+                        + payment.getMethod().getDisplayName() + " | " + payment.getPaidAt());
             }
         }
     }
@@ -290,8 +312,12 @@ public class Main {
     }
 
     private static LocalDate readDueDate(Scanner scanner) {
+        return readDate(scanner, "Enter due date (YYYY-MM-DD): ");
+    }
+
+    private static LocalDate readDate(Scanner scanner, String prompt) {
         while (true) {
-            String input = readRequiredInput(scanner, "Enter due date (YYYY-MM-DD): ");
+            String input = readRequiredInput(scanner, prompt);
             if (input == null) {
                 return null;
             }
@@ -299,6 +325,20 @@ public class Main {
                 return LocalDate.parse(input);
             } catch (DateTimeParseException e) {
                 System.out.println("Enter a valid date in YYYY-MM-DD format.");
+            }
+        }
+    }
+
+    private static FeeService.PaymentMethod readPaymentMethod(Scanner scanner) {
+        while (true) {
+            String input = readRequiredInput(scanner, "Payment method (Cash, Bank or Online): ");
+            if (input == null) {
+                return null;
+            }
+            try {
+                return FeeService.PaymentMethod.fromInput(input);
+            } catch (IllegalArgumentException e) {
+                System.out.println(e.getMessage());
             }
         }
     }
